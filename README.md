@@ -52,5 +52,30 @@ chỉ cần commit + push là bot tự cập nhật sau khi deploy lại.
 | `/translate <lang> <text>` | `/translate en xin chao` | Dịch sang ngôn ngữ chỉ định |
 | `/calc <expr>` | `/calc (12+8)*3/2` | Máy tính (+ - * / // % **) |
 | `/short <url>` | `/short https://...` | Rút gọn link (is.gd, free) |
+| `/meme` | `/meme` | Meme crypto ngẫu nhiên (ảnh) |
+| `/joke` | `/joke` | Joke crypto/kinh doanh |
+| `/fact` | `/fact` | Fact ngẫu nhiên |
+| `/8ball <câu hỏi>` | `/8ball nên mua BTC không?` | Quả cầu tiên tri |
+| `/roll <NdM>` | `/roll 2d6` | Tung xúc xắc |
+| `/flip` | `/flip` | Tung xu Pump/Dump |
+| `/truth` / `/dare` | `/truth` | Truth or Dare (crypto/kinh doanh) |
+| `/quiz` | `/quiz` | Trivia crypto, poll tự chấm điểm 30s |
+| `/confess <text>` | `/confess ...` | Gửi ẩn danh vào group (cần set biến `GROUP_CHAT_ID`) |
+| `/top10` | `/top10` | Top 10 crypto theo vốn hóa |
+| `/fng` | `/fng` | Chỉ số Sợ hãi & Tham lam (Fear & Greed Index) |
+| `/convert <số> <từ> <sang>` | `/convert 100 USD VND` | Quy đổi tiền tệ/crypto (hỗ trợ cả fiat lẫn coin) |
+| `/ping` | `/ping` | Đo tốc độ phản hồi bot |
+| `/rules` | `/rules` | Xem nội quy group |
+
+`/start` giờ hiện **menu nút bấm** (Công cụ / Thị trường / Vui-Giao lưu / Nội quy)
+thay vì list text dài — người mới vào chỉ cần bấm nút, không cần nhớ lệnh.
+Bot cũng **tự chào thành viên mới** khi có ai join group.
 
 Tất cả API đều **free, không cần key** — đúng theo pattern hay dùng.
+Nội dung joke/fact/8ball/truth/dare/quiz nằm hết trong `fun_content.py`,
+sửa thoải mái không cần đụng `bot.py`.
+
+### Kích hoạt /confess (tùy chọn)
+1. Thêm bot vào group, lấy `chat_id` của group (cách nhanh: add bot @RawDataBot vào group, nó tự in ra chat_id).
+2. Trên Railway → Variables → thêm `GROUP_CHAT_ID` = id đó (thường là số âm, vd `-1001234567890`).
+3. Bot phải có quyền gửi tin trong group đó.
