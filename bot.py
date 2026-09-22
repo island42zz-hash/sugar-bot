@@ -1,13 +1,20 @@
 import ast
+import datetime
 import json
 import logging
 import operator
 import os
 import random
 import time
+from zoneinfo import ZoneInfo
 
 import requests
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReactionTypeEmoji,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -17,9 +24,19 @@ from telegram.ext import (
     filters,
 )
 
-from fun_content import DARES, EIGHTBALL, FACTS, JOKES, QUIZZES, RULES, TRUTHS
-
-GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")  # để dùng cho /confess (tùy chọn)
+from fun_content import (
+    DARES,
+    EIGHTBALL,
+    FACTS,
+    IDLE_CHATTER,
+    JOKES,
+    QUIZZES,
+    REACTION_EMOJIS,
+    ROASTS,
+    RULES,
+    THAMTHUY,
+    TRUTHS,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -28,6 +45,7 @@ logging.basicConfig(
 logger = logging.getLogger("sugar-bot")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")  # để dùng cho /confess (tùy chọn)
 TRIGGERS_FILE = os.path.join(os.path.dirname(__file__), "triggers.json")
 
 # Coin symbol -> CoinGecko id (dùng khi Binance không có cặp USDT), mở rộng thêm tùy ý
@@ -49,6 +67,10 @@ COIN_MAP = {
 
 # CoinGecko hay chặn request từ server/datacenter nếu thiếu User-Agent
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (SugarBot/1.0)"}
+
+# Đếm tin nhắn "im ắng" theo từng chat để random buông 1 câu chatter
+_idle_counters: dict[int, int] = {}
+_idle_thresholds: dict[int, int] = {}
 
 
 def load_triggers() -> dict:
@@ -161,7 +183,6 @@ async def crypto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # symbol không tồn tại trên Binance -> rơi xuống fallback CoinGecko
     except Exception:
         logger.exception("crypto binance error")
-        # tiếp tục thử CoinGecko bên dưới
 
     # 2) Fallback: CoinGecko (cho coin nhỏ không có trên Binance)
     try:
@@ -308,106 +329,6 @@ async def short_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Lỗi rút gọn link: {e}")
 
 
-# ---------- /meme ----------
-async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        resp = requests.get(
-            "https://meme-api.com/gimme/cryptocurrencymemes", timeout=10
-        ).json()
-        url = resp.get("url")
-        title = resp.get("title", "Meme")
-        if url:
-            await update.message.reply_photo(photo=url, caption=f"😂 {title}")
-        else:
-            await update.message.reply_text("Không lấy được meme lúc này, thử lại sau 😅")
-    except Exception as e:
-        logger.exception("meme error")
-        await update.message.reply_text(f"Lỗi lấy meme: {e}")
-
-
-# ---------- /joke ----------
-async def joke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🤣 {random.choice(JOKES)}")
-
-
-# ---------- /fact ----------
-async def fact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"💡 {random.choice(FACTS)}")
-
-
-# ---------- /8ball ----------
-async def eightball_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Cú pháp: /8ball <câu hỏi>\nVD: /8ball Có nên mua BTC hôm nay?")
-        return
-    question = " ".join(context.args)
-    await update.message.reply_text(f"🎱 {question}\n→ {random.choice(EIGHTBALL)}")
-
-
-# ---------- /roll ----------
-async def roll_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    spec = context.args[0] if context.args else "1d6"
-    try:
-        n, sides = spec.lower().split("d")
-        n = int(n) if n else 1
-        sides = int(sides)
-        if not (1 <= n <= 20 and 2 <= sides <= 1000):
-            raise ValueError
-        rolls = [random.randint(1, sides) for _ in range(n)]
-        total = sum(rolls)
-        detail = ", ".join(str(r) for r in rolls)
-        await update.message.reply_text(f"🎲 Kết quả: {detail} (tổng: {total})")
-    except Exception:
-        await update.message.reply_text("Cú pháp: /roll <NdM>\nVD: /roll 2d6 (tung 2 xúc xắc 6 mặt)")
-
-
-# ---------- /flip ----------
-async def flip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    result = random.choice(["🚀 PUMP", "📉 DUMP"])
-    await update.message.reply_text(f"🪙 Tung đồng xu crypto: {result}")
-
-
-# ---------- /truth & /dare ----------
-async def truth_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🧠 Truth: {random.choice(TRUTHS)}")
-
-
-async def dare_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🔥 Dare: {random.choice(DARES)}")
-
-
-# ---------- /quiz ----------
-async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    question, options, correct_idx = random.choice(QUIZZES)
-    await context.bot.send_poll(
-        chat_id=update.effective_chat.id,
-        question=f"🧩 {question}",
-        options=options,
-        type="quiz",
-        correct_option_id=correct_idx,
-        is_anonymous=True,
-        open_period=30,
-    )
-
-
-# ---------- /confess ----------
-async def confess_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Cú pháp: /confess <nội dung> — gửi ẩn danh vào group cấu hình sẵn.")
-        return
-    if not GROUP_CHAT_ID:
-        await update.message.reply_text("Chưa cấu hình GROUP_CHAT_ID trên Railway nên chưa dùng được /confess.")
-        return
-    text = " ".join(context.args)
-    try:
-        await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=f"🙊 Confession ẩn danh:\n{text}")
-        if update.effective_chat.id != int(GROUP_CHAT_ID):
-            await update.message.reply_text("Đã gửi ẩn danh vào group ✅")
-    except Exception as e:
-        logger.exception("confess error")
-        await update.message.reply_text(f"Lỗi gửi confession: {e}")
-
-
 # ---------- /fng — Fear & Greed Index ----------
 async def fng_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -504,11 +425,9 @@ async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _to_usd(amount: float, symbol: str):
     if symbol == "USD":
         return amount
-    # thử coi là tiền pháp định qua tỷ giá USD
     rate = _get_fiat_rate(symbol)
     if rate is not None:
         return amount / rate
-    # thử coi là crypto qua Binance
     price = _get_binance_price(symbol)
     if price is not None:
         return amount * price
@@ -578,7 +497,119 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 
-# ---------- Auto-reply theo keyword ----------
+# ---------- /meme ----------
+MEME_SUBREDDITS = ["cryptocurrencymemes", "CryptoCurrencyMemes", "memes"]
+
+
+async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sub = random.choice(MEME_SUBREDDITS)
+    try:
+        resp = requests.get(f"https://meme-api.com/gimme/{sub}", timeout=10).json()
+        url = resp.get("url")
+        title = resp.get("title", "Meme")
+        if url:
+            await update.message.reply_photo(photo=url, caption=f"😂 {title}")
+        else:
+            await update.message.reply_text("Không lấy được meme lúc này, thử lại sau 😅")
+    except Exception as e:
+        logger.exception("meme error")
+        await update.message.reply_text(f"Lỗi lấy meme: {e}")
+
+
+# ---------- /joke ----------
+async def joke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"🤣 {random.choice(JOKES)}")
+
+
+# ---------- /fact ----------
+async def fact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"💡 {random.choice(FACTS)}")
+
+
+# ---------- /8ball ----------
+async def eightball_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Cú pháp: /8ball <câu hỏi>\nVD: /8ball Có nên mua BTC hôm nay?")
+        return
+    question = " ".join(context.args)
+    await update.message.reply_text(f"🎱 {question}\n→ {random.choice(EIGHTBALL)}")
+
+
+# ---------- /roll ----------
+async def roll_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    spec = context.args[0] if context.args else "1d6"
+    try:
+        n, sides = spec.lower().split("d")
+        n = int(n) if n else 1
+        sides = int(sides)
+        if not (1 <= n <= 20 and 2 <= sides <= 1000):
+            raise ValueError
+        rolls = [random.randint(1, sides) for _ in range(n)]
+        total = sum(rolls)
+        detail = ", ".join(str(r) for r in rolls)
+        await update.message.reply_text(f"🎲 Kết quả: {detail} (tổng: {total})")
+    except Exception:
+        await update.message.reply_text("Cú pháp: /roll <NdM>\nVD: /roll 2d6 (tung 2 xúc xắc 6 mặt)")
+
+
+# ---------- /flip ----------
+async def flip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = random.choice(["🚀 PUMP", "📉 DUMP"])
+    await update.message.reply_text(f"🪙 Tung đồng xu crypto: {result}")
+
+
+# ---------- /truth & /dare ----------
+async def truth_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"🧠 Truth: {random.choice(TRUTHS)}")
+
+
+async def dare_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"🔥 Dare: {random.choice(DARES)}")
+
+
+# ---------- /thamthuy ----------
+async def thamthuy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"🌚 {random.choice(THAMTHUY)}")
+
+
+# ---------- /roast ----------
+async def roast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"🔥 {random.choice(ROASTS)}")
+
+
+# ---------- /quiz ----------
+async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    question, options, correct_idx = random.choice(QUIZZES)
+    await context.bot.send_poll(
+        chat_id=update.effective_chat.id,
+        question=f"🧩 {question}",
+        options=options,
+        type="quiz",
+        correct_option_id=correct_idx,
+        is_anonymous=True,
+        open_period=30,
+    )
+
+
+# ---------- /confess ----------
+async def confess_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Cú pháp: /confess <nội dung> — gửi ẩn danh vào group cấu hình sẵn.")
+        return
+    if not GROUP_CHAT_ID:
+        await update.message.reply_text("Chưa cấu hình GROUP_CHAT_ID trên Railway nên chưa dùng được /confess.")
+        return
+    text = " ".join(context.args)
+    try:
+        await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=f"🙊 Confession ẩn danh:\n{text}")
+        if update.effective_chat.id != int(GROUP_CHAT_ID):
+            await update.message.reply_text("Đã gửi ẩn danh vào group ✅")
+    except Exception as e:
+        logger.exception("confess error")
+        await update.message.reply_text(f"Lỗi gửi confession: {e}")
+
+
+# ---------- Auto-reply theo keyword + phản ứng ngẫu nhiên cho sống động ----------
 async def auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -588,6 +619,27 @@ async def auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if keyword.lower() in text:
             await update.message.reply_text(reply)
             return
+
+    # Không trúng từ khóa nào -> có thể random react/chatter cho group đỡ im ắng
+    chat_id = update.effective_chat.id
+    _idle_counters[chat_id] = _idle_counters.get(chat_id, 0) + 1
+    threshold = _idle_thresholds.setdefault(chat_id, random.randint(15, 30))
+
+    # Thỉnh thoảng (khoảng 10%) thả reaction emoji vào tin nhắn cho vui, không spam text
+    if random.random() < 0.1:
+        try:
+            await context.bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=update.message.message_id,
+                reaction=[ReactionTypeEmoji(random.choice(REACTION_EMOJIS))],
+            )
+        except Exception:
+            pass  # bot có thể chưa có quyền react, bỏ qua êm
+
+    if _idle_counters[chat_id] >= threshold:
+        _idle_counters[chat_id] = 0
+        _idle_thresholds[chat_id] = random.randint(15, 30)
+        await update.message.reply_text(random.choice(IDLE_CHATTER))
 
 
 # ---------- /start & /help — menu nút bấm ----------
@@ -625,6 +677,8 @@ MENU_TEXT = {
         "/roll <NdM> — tung xúc xắc\n"
         "/flip — tung xu pump/dump\n"
         "/truth, /dare — truth or dare\n"
+        "/thamthuy — câu nói thâm thúy\n"
+        "/roast — troll nhẹ thị trường\n"
         "/quiz — trivia crypto (poll 30s)\n"
         "/confess <nội dung> — confession ẩn danh"
     ),
@@ -647,11 +701,55 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=MAIN_MENU)
 
 
+# ---------- Bản tin sáng tự động (job hằng ngày) ----------
+async def daily_briefing(context: ContextTypes.DEFAULT_TYPE):
+    if not GROUP_CHAT_ID:
+        return
+    lines = ["☀️ Bản tin sáng Sugar Bot\n"]
+    try:
+        resp = requests.get(
+            "https://api.binance.com/api/v3/ticker/24hr",
+            params={"symbol": "BTCUSDT"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            price = float(data["lastPrice"])
+            change = float(data["priceChangePercent"])
+            arrow = "🟢" if change >= 0 else "🔴"
+            lines.append(f"💰 BTC: ${price:,.0f} {arrow} {change:.2f}% (24h)")
+    except Exception:
+        logger.exception("daily_briefing btc error")
+
+    try:
+        fng = requests.get("https://api.alternative.me/fng/", timeout=10, headers=HTTP_HEADERS)
+        if fng.status_code == 200:
+            entry = fng.json()["data"][0]
+            lines.append(f"📊 Fear & Greed: {entry['value']}/100")
+    except Exception:
+        logger.exception("daily_briefing fng error")
+
+    lines.append(f"\n💡 {random.choice(FACTS)}")
+    lines.append(f"\n🤣 {random.choice(JOKES)}")
+    lines.append("\nChúc cả nhà một ngày múc coin thuận lợi 🚀")
+
+    try:
+        await context.bot.send_message(chat_id=GROUP_CHAT_ID, text="\n".join(lines))
+    except Exception:
+        logger.exception("daily_briefing send error")
+
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("Thiếu biến môi trường BOT_TOKEN")
 
     app = Application.builder().token(BOT_TOKEN).build()
+
+    if GROUP_CHAT_ID and app.job_queue:
+        app.job_queue.run_daily(
+            daily_briefing,
+            time=datetime.time(hour=8, minute=0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")),
+        )
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", start_cmd))
@@ -673,6 +771,8 @@ def main():
     app.add_handler(CommandHandler("flip", flip_cmd))
     app.add_handler(CommandHandler("truth", truth_cmd))
     app.add_handler(CommandHandler("dare", dare_cmd))
+    app.add_handler(CommandHandler("thamthuy", thamthuy_cmd))
+    app.add_handler(CommandHandler("roast", roast_cmd))
     app.add_handler(CommandHandler("quiz", quiz_cmd))
     app.add_handler(CommandHandler("confess", confess_cmd))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
