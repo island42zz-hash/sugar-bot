@@ -55,6 +55,8 @@ Từ giờ mỗi lần push vào `main`, bot tự deploy lại.
 | `/ping` | Đo tốc độ phản hồi |
 | `/top10` | Top 10 coin theo vốn hóa |
 | `/fng` | Chỉ số Sợ hãi & Tham lam |
+| `/stocks` | Chứng khoán thế giới — S&P500, Dow Jones, Nasdaq, Nikkei, Hang Seng, FTSE, DAX |
+| `/news [vn\|kinhdoanh\|crypto]` | Tin tức Việt Nam (VnExpress, Coin68) |
 | `/meme` | **Ảnh meme thật**, ngẫu nhiên |
 | `/joke` | Joke crypto/kinh doanh |
 | `/fact` | Fact thú vị |
@@ -80,9 +82,31 @@ trả lời mọi tin nhắn để tránh spam chat.
   vào tin nhắn — không kèm text, chỉ react cho vui.
 - **Buông câu troll khi im ắng**: sau khoảng 15-30 tin nhắn không ai trigger bot,
   nó tự nhắn 1 câu trong `IDLE_CHATTER` (sửa trong `fun_content.py`).
-- **Bản tin sáng tự động**: 8:00 sáng (giờ VN) mỗi ngày, bot tự đăng giá BTC,
-  Fear & Greed Index, 1 fact + 1 joke ngẫu nhiên vào group — **cần set biến
-  `GROUP_CHAT_ID`** trên Railway, nếu không tính năng này sẽ không chạy (các
-  tính năng khác vẫn hoạt động bình thường).
+- **Bản tin tự động 3 lần/ngày** (giờ VN, cần `GROUP_CHAT_ID`):
+  - **8:00 sáng** — giá BTC, Fear & Greed, 1 tin kinh doanh, fact + joke
+  - **12:30 trưa** — giá BTC, 1 tin crypto (Coin68), quả cầu tiên tri
+  - **20:00 tối** — giá BTC, Fear & Greed, 1 tin tổng hợp, câu thâm thúy
+  - Nếu chưa set `GROUP_CHAT_ID` thì bản tin không chạy, mọi lệnh khác vẫn bình thường.
+- **`/news [vn|kinhdoanh|crypto]`** — xem tin bất cứ lúc nào, không cần đợi giờ tự động.
+  - `vn` — VnExpress tin mới nhất
+  - `kinhdoanh` — VnExpress mục Kinh doanh
+  - `crypto` — Coin68 (tin crypto tiếng Việt)
+
+### Cách lấy GROUP_CHAT_ID
+1. Add bot **@RawDataBot** vào group (tạm thời)
+2. Nó tự nhắn JSON, tìm dòng `"chat":{"id": -100xxxxxxxxxx}` — copy số đó (kèm dấu `-`)
+3. Xóa @RawDataBot ra khỏi group
+4. Railway → service worker → Variables → thêm `GROUP_CHAT_ID` = số vừa copy
+
+## Ghi chú về GRAM
+
+"Gram" là tên gốc dự án tiền số của Telegram (2018), bị hủy năm 2020 do vướng
+SEC Mỹ. Cộng đồng sau đó lập lại thành **TON (The Open Network)** — coin thật
+đang giao dịch. Gõ `/crypto GRAM` bot sẽ tự hiểu và trả về giá TON kèm ghi chú.
+
+## Logo coin
+
+`/crypto <coin>` giờ gửi kèm ảnh logo thật của coin (lấy từ CoinGecko) thay vì
+chỉ text — nếu không lấy được logo, bot tự động rơi về text thuần, không lỗi.
 
 Tất cả API đều free, không cần key.

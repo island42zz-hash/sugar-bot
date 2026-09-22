@@ -6,6 +6,7 @@ import operator
 import os
 import random
 import time
+import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
 import requests
@@ -71,6 +72,50 @@ HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (SugarBot/1.0)"}
 # Đếm tin nhắn "im ắng" theo từng chat để random buông 1 câu chatter
 _idle_counters: dict[int, int] = {}
 _idle_thresholds: dict[int, int] = {}
+
+# Nguồn tin RSS tiếng Việt — free, không cần key
+NEWS_FEEDS = {
+    "vn": "https://vnexpress.net/rss/tin-moi-nhat.rss",
+    "kinhdoanh": "https://vnexpress.net/rss/kinh-doanh.rss",
+    "crypto": "https://coin68.com/feed/",
+}
+
+
+def parse_rss(url: str, limit: int = 5):
+    resp = requests.get(url, headers=HTTP_HEADERS, timeout=10)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+    items = root.findall(".//item")[:limit]
+    result = []
+    for item in items:
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        if title:
+            result.append((title, link))
+    return result
+
+
+# ---------- /news ----------
+async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = context.args[0].lower() if context.args else "vn"
+    feed_url = NEWS_FEEDS.get(topic)
+    if not feed_url:
+        await update.message.reply_text(
+            f"Chủ đề '{topic}' không có. Chọn: {', '.join(NEWS_FEEDS)}\nVD: /news crypto"
+        )
+        return
+    try:
+        items = parse_rss(feed_url, limit=5)
+        if not items:
+            await update.message.reply_text("Không lấy được tin lúc này 😕")
+            return
+        lines = [f"📰 Tin tức — {topic}\n"]
+        for i, (title, link) in enumerate(items, start=1):
+            lines.append(f"{i}. {title}\n{link}")
+        await update.message.reply_text("\n\n".join(lines), disable_web_page_preview=True)
+    except Exception as e:
+        logger.exception("news error")
+        await update.message.reply_text(f"Lỗi lấy tin tức: {e}")
 
 
 def load_triggers() -> dict:
@@ -156,12 +201,65 @@ WEATHER_CODES = {
 }
 
 
+# Alias coin — GRAM là tên gốc dự án của Telegram (2018), bị hủy 2020,
+# cộng đồng lập lại thành TON (The Open Network) — coin thật đang giao dịch.
+CRYPTO_ALIASES = {"GRAM": "TON"}
+
+
+def get_coin_logo(symbol: str):
+    """Lấy URL logo coin từ CoinGecko, trả None nếu không có."""
+    try:
+        coin_id = COIN_MAP.get(symbol)
+        if not coin_id:
+            search = requests.get(
+                "https://api.coingecko.com/api/v3/search",
+                params={"query": symbol},
+                headers=HTTP_HEADERS,
+                timeout=8,
+            )
+            search.raise_for_status()
+            coins = search.json().get("coins", [])
+            if not coins:
+                return None
+            coin_id = coins[0]["id"]
+        markets = requests.get(
+            "https://api.coingecko.com/api/v3/coins/markets",
+            params={"vs_currency": "usd", "ids": coin_id},
+            headers=HTTP_HEADERS,
+            timeout=8,
+        )
+        markets.raise_for_status()
+        data = markets.json()
+        if data:
+            return data[0].get("image")
+    except Exception:
+        logger.exception("get_coin_logo error")
+    return None
+
+
+async def _reply_with_logo(update: Update, symbol: str, caption: str):
+    logo_url = get_coin_logo(symbol)
+    if logo_url:
+        try:
+            await update.message.reply_photo(photo=logo_url, caption=caption)
+            return
+        except Exception:
+            logger.exception("send logo error")
+    await update.message.reply_text(caption)
+
+
 # ---------- /crypto ----------
 async def crypto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Cú pháp: /crypto <coin>\nVD: /crypto BTC")
         return
-    symbol = context.args[0].upper().lstrip("$")
+    raw_symbol = context.args[0].upper().lstrip("$")
+    alias_note = ""
+    if raw_symbol in CRYPTO_ALIASES:
+        alias_note = f" (Gram — dự án gốc của Telegram, nay là TON)"
+        symbol = CRYPTO_ALIASES[raw_symbol]
+    else:
+        symbol = raw_symbol
 
     # 1) Ưu tiên Binance — ổn định, free, không bị chặn từ server
     try:
@@ -176,9 +274,11 @@ async def crypto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             price = float(data["lastPrice"])
             change = float(data["priceChangePercent"])
             arrow = "🟢" if change >= 0 else "🔴"
-            await update.message.reply_text(
-                f"💰 {symbol}/USDT: ${price:,.4f}\n{arrow} 24h: {change:.2f}% (nguồn: Binance)"
+            caption = (
+                f"💰 {symbol}/USDT{alias_note}: ${price:,.4f}\n"
+                f"{arrow} 24h: {change:.2f}% (nguồn: Binance)"
             )
+            await _reply_with_logo(update, symbol, caption)
             return
         # symbol không tồn tại trên Binance -> rơi xuống fallback CoinGecko
     except Exception:
@@ -221,12 +321,56 @@ async def crypto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         usd = data.get("usd")
         change = data.get("usd_24h_change", 0)
         arrow = "🟢" if change >= 0 else "🔴"
-        await update.message.reply_text(
-            f"💰 {symbol}: ${usd:,.4f}\n{arrow} 24h: {change:.2f}% (nguồn: CoinGecko)"
+        caption = (
+            f"💰 {symbol}{alias_note}: ${usd:,.4f}\n"
+            f"{arrow} 24h: {change:.2f}% (nguồn: CoinGecko)"
         )
+        await _reply_with_logo(update, symbol, caption)
     except Exception as e:
         logger.exception("crypto coingecko error")
         await update.message.reply_text(f"Lỗi lấy giá crypto: {e}")
+
+
+# ---------- /stocks — chứng khoán thế giới ----------
+STOCK_INDEXES = {
+    "S&P 500 (Mỹ)": "^GSPC",
+    "Dow Jones (Mỹ)": "^DJI",
+    "Nasdaq (Mỹ)": "^IXIC",
+    "Nikkei 225 (Nhật)": "^N225",
+    "Hang Seng (HK)": "^HSI",
+    "FTSE 100 (Anh)": "^FTSE",
+    "DAX (Đức)": "^GDAXI",
+}
+
+
+def get_stock_quote(symbol: str):
+    resp = requests.get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+        headers=HTTP_HEADERS,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    meta = resp.json()["chart"]["result"][0]["meta"]
+    price = meta["regularMarketPrice"]
+    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+    change = ((price - prev) / prev * 100) if prev else 0
+    return price, change
+
+
+async def stocks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lines = ["🌍 Chứng khoán thế giới\n"]
+    for name, symbol in STOCK_INDEXES.items():
+        try:
+            price, change = get_stock_quote(symbol)
+            arrow = "🟢" if change >= 0 else "🔴"
+            lines.append(f"{name}: {price:,.2f} {arrow} {change:.2f}%")
+        except Exception:
+            logger.exception(f"stocks error {symbol}")
+            continue
+    if len(lines) == 1:
+        await update.message.reply_text("Không lấy được dữ liệu chứng khoán lúc này 😕")
+        return
+    await update.message.reply_text("\n".join(lines))
 
 
 # ---------- /translate ----------
@@ -664,9 +808,11 @@ MENU_TEXT = {
     ),
     "menu_market": (
         "📈 Thị trường\n\n"
-        "/crypto <coin> — giá crypto real-time\n"
+        "/crypto <coin> — giá crypto real-time + logo (thử /crypto GRAM 😉)\n"
         "/top10 — Top 10 coin theo vốn hóa\n"
-        "/fng — Chỉ số Sợ hãi & Tham lam"
+        "/fng — Chỉ số Sợ hãi & Tham lam\n"
+        "/stocks — Chứng khoán thế giới (S&P500, Dow, Nasdaq...)\n"
+        "/news [vn|kinhdoanh|crypto] — tin tức Việt Nam"
     ),
     "menu_fun": (
         "🎉 Vui / Giao lưu\n\n"
@@ -701,40 +847,70 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=MAIN_MENU)
 
 
-# ---------- Bản tin sáng tự động (job hằng ngày) ----------
+# ---------- Bản tin tự động (job hằng ngày — sáng/trưa/tối) ----------
 async def daily_briefing(context: ContextTypes.DEFAULT_TYPE):
     if not GROUP_CHAT_ID:
         return
-    lines = ["☀️ Bản tin sáng Sugar Bot\n"]
+    period = context.job.data if context.job else "morning"
+
+    def get_btc():
+        try:
+            resp = requests.get(
+                "https://api.binance.com/api/v3/ticker/24hr",
+                params={"symbol": "BTCUSDT"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                d = resp.json()
+                price = float(d["lastPrice"])
+                change = float(d["priceChangePercent"])
+                arrow = "🟢" if change >= 0 else "🔴"
+                return f"💰 BTC: ${price:,.0f} {arrow} {change:.2f}% (24h)"
+        except Exception:
+            logger.exception("daily_briefing btc error")
+        return None
+
+    def get_fng():
+        try:
+            resp = requests.get("https://api.alternative.me/fng/", timeout=10, headers=HTTP_HEADERS)
+            if resp.status_code == 200:
+                entry = resp.json()["data"][0]
+                return f"📊 Fear & Greed: {entry['value']}/100"
+        except Exception:
+            logger.exception("daily_briefing fng error")
+        return None
+
+    def get_news_line(topic="vn"):
+        try:
+            items = parse_rss(NEWS_FEEDS[topic], limit=1)
+            if items:
+                title, link = items[0]
+                return f"📰 {title}\n{link}"
+        except Exception:
+            logger.exception("daily_briefing news error")
+        return None
+
+    lines = []
+    if period == "morning":
+        lines.append("☀️ Bản tin sáng Sugar Bot\n")
+        lines += [x for x in [get_btc(), get_fng(), get_news_line("kinhdoanh")] if x]
+        lines.append(f"\n💡 {random.choice(FACTS)}")
+        lines.append(f"🤣 {random.choice(JOKES)}")
+        lines.append("\nChúc cả nhà một ngày múc coin thuận lợi 🚀")
+    elif period == "noon":
+        lines.append("🌤 Điểm tin trưa\n")
+        lines += [x for x in [get_btc(), get_news_line("crypto")] if x]
+        lines.append(f"\n🎱 {random.choice(EIGHTBALL)}")
+    else:  # evening
+        lines.append("🌙 Tổng kết tối\n")
+        lines += [x for x in [get_btc(), get_fng(), get_news_line("vn")] if x]
+        lines.append(f"\n🌚 {random.choice(THAMTHUY)}")
+        lines.append("\nNgủ ngon, mai lại múc tiếp 😴")
+
     try:
-        resp = requests.get(
-            "https://api.binance.com/api/v3/ticker/24hr",
-            params={"symbol": "BTCUSDT"},
-            timeout=10,
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID, text="\n".join(lines), disable_web_page_preview=True
         )
-        if resp.status_code == 200:
-            data = resp.json()
-            price = float(data["lastPrice"])
-            change = float(data["priceChangePercent"])
-            arrow = "🟢" if change >= 0 else "🔴"
-            lines.append(f"💰 BTC: ${price:,.0f} {arrow} {change:.2f}% (24h)")
-    except Exception:
-        logger.exception("daily_briefing btc error")
-
-    try:
-        fng = requests.get("https://api.alternative.me/fng/", timeout=10, headers=HTTP_HEADERS)
-        if fng.status_code == 200:
-            entry = fng.json()["data"][0]
-            lines.append(f"📊 Fear & Greed: {entry['value']}/100")
-    except Exception:
-        logger.exception("daily_briefing fng error")
-
-    lines.append(f"\n💡 {random.choice(FACTS)}")
-    lines.append(f"\n🤣 {random.choice(JOKES)}")
-    lines.append("\nChúc cả nhà một ngày múc coin thuận lợi 🚀")
-
-    try:
-        await context.bot.send_message(chat_id=GROUP_CHAT_ID, text="\n".join(lines))
     except Exception:
         logger.exception("daily_briefing send error")
 
@@ -746,9 +922,15 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     if GROUP_CHAT_ID and app.job_queue:
+        tz = ZoneInfo("Asia/Ho_Chi_Minh")
         app.job_queue.run_daily(
-            daily_briefing,
-            time=datetime.time(hour=8, minute=0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh")),
+            daily_briefing, time=datetime.time(hour=8, minute=0, tzinfo=tz), data="morning"
+        )
+        app.job_queue.run_daily(
+            daily_briefing, time=datetime.time(hour=12, minute=30, tzinfo=tz), data="noon"
+        )
+        app.job_queue.run_daily(
+            daily_briefing, time=datetime.time(hour=20, minute=0, tzinfo=tz), data="evening"
         )
 
     app.add_handler(CommandHandler("start", start_cmd))
@@ -762,6 +944,8 @@ def main():
     app.add_handler(CommandHandler("ping", ping_cmd))
     app.add_handler(CommandHandler("top10", top10_cmd))
     app.add_handler(CommandHandler("fng", fng_cmd))
+    app.add_handler(CommandHandler("news", news_cmd))
+    app.add_handler(CommandHandler("stocks", stocks_cmd))
     app.add_handler(CommandHandler("rules", rules_cmd))
     app.add_handler(CommandHandler("meme", meme_cmd))
     app.add_handler(CommandHandler("joke", joke_cmd))
