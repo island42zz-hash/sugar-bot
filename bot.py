@@ -1,970 +1,652 @@
+#!/usr/bin/env python3
+"""Sugar Super Bot — thuần Việt, trả lời lệnh / và nút nhóm, có thẻ ảnh.
+
+Chạy:
+  TELEGRAM_BOT_TOKEN=123:abc python3 scripts/bot.py
+"""
+
+from __future__ import annotations
+
 import ast
-import datetime
 import json
-import logging
 import operator
 import os
 import random
+import re
+import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import xml.etree.ElementTree as ET
-from zoneinfo import ZoneInfo
+from pathlib import Path
 
-import requests
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReactionTypeEmoji,
-    Update,
-)
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fun_content import (
-    DARES,
-    EIGHTBALL,
-    FACTS,
-    IDLE_CHATTER,
-    JOKES,
-    QUIZZES,
-    REACTION_EMOJIS,
-    ROASTS,
-    RULES,
-    THAMTHUY,
-    TRUTHS,
-)
+import cards  # noqa: E402
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger("sugar-bot")
+COPY = json.loads((ROOT / "assets" / "copy.json").read_text(encoding="utf-8"))
+FUN = json.loads((ROOT / "assets" / "fun.json").read_text(encoding="utf-8"))
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")  # để dùng cho /confess (tùy chọn)
-TRIGGERS_FILE = os.path.join(os.path.dirname(__file__), "triggers.json")
+BUTTONS = ["Công cụ", "Thị trường", "Vui / Giao lưu", "Nội quy"]
+KEYBOARD = [["Công cụ", "Thị trường"], ["Vui / Giao lưu", "Nội quy"]]
 
-# Coin symbol -> CoinGecko id (dùng khi Binance không có cặp USDT), mở rộng thêm tùy ý
-COIN_MAP = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "TON": "the-open-network",
-    "USDT": "tether",
-    "USDC": "usd-coin",
-    "BNB": "binancecoin",
-    "SOL": "solana",
-    "XRP": "ripple",
-    "DOGE": "dogecoin",
-    "ADA": "cardano",
-    "TRX": "tron",
-    "SUI": "sui",
-    "OKB": "okb",
+MENU = [
+    ("batdau", "Mở bot và hiện nút"),
+    ("trogiup", "Xem bốn nhóm lệnh"),
+    ("gia", "Giá tiền mã hóa kèm ảnh"),
+    ("xephang", "Mười mã vốn hóa lớn"),
+    ("socamxuc", "Chỉ số sợ hãi và tham lam"),
+    ("chungkhoan", "Chỉ số chứng khoán thế giới"),
+    ("tintuc", "Tin Việt Nam, làm ăn hoặc tiền mã hóa"),
+    ("thoittiet", "Thời tiết theo thành phố"),
+    ("dich", "Dịch nhanh"),
+    ("tinh", "Máy tính"),
+    ("rutgon", "Rút gọn liên kết"),
+    ("doitien", "Đổi tiền"),
+    ("tocdo", "Đo tốc độ phản hồi"),
+    ("anhche", "Ảnh chế thị trường"),
+    ("caucuo", "Câu cười"),
+    ("suthat", "Sự thật ngắn"),
+    ("boi", "Quả cầu trả lời"),
+    ("xucxac", "Tung xúc xắc"),
+    ("tungxu", "Tung đồng xu"),
+    ("sukien", "Câu hỏi sự thật"),
+    ("thuthach", "Thử thách"),
+    ("dovui", "Đố vui, bình chọn 30 giây"),
+    ("tamtinh", "Tâm sự ẩn với nhóm"),
+    ("thamthuy", "Câu nói thâm"),
+    ("treu", "Trêu nhẹ thị trường"),
+    ("noiquy", "Nội quy nhóm"),
+]
+
+ALIASES = {
+    "start": "batdau",
+    "help": "trogiup",
+    "ping": "tocdo",
+    "price": "gia",
+    "crypto": "gia",
+    "top10": "xephang",
+    "fng": "socamxuc",
+    "stocks": "chungkhoan",
+    "news": "tintuc",
+    "weather": "thoittiet",
+    "translate": "dich",
+    "calc": "tinh",
+    "short": "rutgon",
+    "convert": "doitien",
+    "meme": "anhche",
+    "joke": "caucuo",
+    "fact": "suthat",
+    "8ball": "boi",
+    "roll": "xucxac",
+    "flip": "tungxu",
+    "truth": "sukien",
+    "dare": "thuthach",
+    "quiz": "dovui",
+    "confess": "tamtinh",
+    "roast": "treu",
+    "rules": "noiquy",
 }
 
-# CoinGecko hay chặn request từ server/datacenter nếu thiếu User-Agent
-HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (SugarBot/1.0)"}
-
-# Đếm tin nhắn "im ắng" theo từng chat để random buông 1 câu chatter
-_idle_counters: dict[int, int] = {}
-_idle_thresholds: dict[int, int] = {}
-
-# Nguồn tin RSS tiếng Việt — free, không cần key
-NEWS_FEEDS = {
-    "vn": "https://vnexpress.net/rss/tin-moi-nhat.rss",
-    "kinhdoanh": "https://vnexpress.net/rss/kinh-doanh.rss",
-    "crypto": "https://coin68.com/feed/",
+GROUPS = {
+    "Công cụ": [
+        "/thoittiet <thành phố> — thời tiết",
+        "/dich <văn bản> — dịch nhanh",
+        "/tinh <phép tính> — máy tính",
+        "/rutgon <liên kết> — rút gọn link",
+        "/doitien <số> <từ> <sang> — đổi tiền",
+        "/tocdo — tốc độ phản hồi",
+    ],
+    "Thị trường": [
+        "/gia <mã> — giá kèm ảnh, thử /gia btc",
+        "/xephang — mười mã theo vốn hóa",
+        "/socamxuc — sợ hãi và tham lam",
+        "/chungkhoan — Mỹ và Việt Nam",
+        "/tintuc [viet|lam|tien] — tin",
+    ],
+    "Vui / Giao lưu": [
+        "/anhche — ảnh chế",
+        "/caucuo — câu cười",
+        "/suthat — sự thật ngắn",
+        "/boi <câu hỏi> — quả cầu",
+        "/xucxac [2d6] — xúc xắc",
+        "/tungxu — đồng xu",
+        "/sukien — sự thật",
+        "/thuthach — thử thách",
+        "/dovui — đố vui",
+        "/tamtinh <nội dung> — tâm sự ẩn danh",
+        "/thamthuy — câu nói thâm",
+        "/treu — trêu nhẹ thị trường",
+    ],
 }
 
-
-def parse_rss(url: str, limit: int = 5):
-    resp = requests.get(url, headers=HTTP_HEADERS, timeout=10)
-    resp.raise_for_status()
-    root = ET.fromstring(resp.content)
-    items = root.findall(".//item")[:limit]
-    result = []
-    for item in items:
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        if title:
-            result.append((title, link))
-    return result
-
-
-# ---------- /news ----------
-async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    topic = context.args[0].lower() if context.args else "vn"
-    feed_url = NEWS_FEEDS.get(topic)
-    if not feed_url:
-        await update.message.reply_text(
-            f"Chủ đề '{topic}' không có. Chọn: {', '.join(NEWS_FEEDS)}\nVD: /news crypto"
-        )
-        return
-    try:
-        items = parse_rss(feed_url, limit=5)
-        if not items:
-            await update.message.reply_text("Không lấy được tin lúc này 😕")
-            return
-        lines = [f"📰 Tin tức — {topic}\n"]
-        for i, (title, link) in enumerate(items, start=1):
-            lines.append(f"{i}. {title}\n{link}")
-        await update.message.reply_text("\n\n".join(lines), disable_web_page_preview=True)
-    except Exception as e:
-        logger.exception("news error")
-        await update.message.reply_text(f"Lỗi lấy tin tức: {e}")
-
-
-def load_triggers() -> dict:
-    try:
-        with open(TRIGGERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
-
-# ---------- /weather ----------
-async def weather_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Cú pháp: /weather <tên thành phố>\nVD: /weather Phu Quoc")
-        return
-    city = " ".join(context.args)
-    try:
-        geo = requests.get(
-            "https://geocoding-api.open-meteo.com/v1/search",
-            params={"name": city, "count": 1, "language": "vi"},
-            timeout=10,
-        ).json()
-        results = geo.get("results")
-        if not results:
-            await update.message.reply_text(f"Không tìm thấy thành phố '{city}' 😕")
-            return
-        loc = results[0]
-        lat, lon = loc["latitude"], loc["longitude"]
-        name = loc.get("name", city)
-        country = loc.get("country", "")
-
-        wx = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
-            },
-            timeout=10,
-        ).json()
-        cur = wx.get("current", {})
-        temp = cur.get("temperature_2m")
-        humidity = cur.get("relative_humidity_2m")
-        wind = cur.get("wind_speed_10m")
-        code = cur.get("weather_code")
-
-        desc = WEATHER_CODES.get(code, "Không rõ")
-        msg = (
-            f"🌤 Thời tiết {name}, {country}\n"
-            f"🌡 Nhiệt độ: {temp}°C\n"
-            f"💧 Độ ẩm: {humidity}%\n"
-            f"💨 Gió: {wind} km/h\n"
-            f"☁️ Tình trạng: {desc}"
-        )
-        await update.message.reply_text(msg)
-    except Exception as e:
-        logger.exception("weather error")
-        await update.message.reply_text(f"Lỗi lấy thời tiết: {e}")
-
-
-WEATHER_CODES = {
-    0: "Trời quang",
-    1: "Ít mây",
-    2: "Mây rải rác",
-    3: "Nhiều mây",
-    45: "Sương mù",
-    48: "Sương mù đóng băng",
-    51: "Mưa phùn nhẹ",
-    53: "Mưa phùn",
-    55: "Mưa phùn dày",
-    61: "Mưa nhỏ",
-    63: "Mưa vừa",
-    65: "Mưa to",
-    71: "Tuyết nhẹ",
-    73: "Tuyết vừa",
-    75: "Tuyết to",
-    80: "Mưa rào nhẹ",
-    81: "Mưa rào vừa",
-    82: "Mưa rào to",
-    95: "Dông",
-    96: "Dông kèm mưa đá",
-    99: "Dông kèm mưa đá to",
-}
-
-
-# Alias coin — GRAM là tên gốc dự án của Telegram (2018), bị hủy 2020,
-# cộng đồng lập lại thành TON (The Open Network) — coin thật đang giao dịch.
-CRYPTO_ALIASES = {"GRAM": "TON"}
-
-
-def get_coin_logo(symbol: str):
-    """Lấy URL logo coin từ CoinGecko, trả None nếu không có."""
-    try:
-        coin_id = COIN_MAP.get(symbol)
-        if not coin_id:
-            search = requests.get(
-                "https://api.coingecko.com/api/v3/search",
-                params={"query": symbol},
-                headers=HTTP_HEADERS,
-                timeout=8,
-            )
-            search.raise_for_status()
-            coins = search.json().get("coins", [])
-            if not coins:
-                return None
-            coin_id = coins[0]["id"]
-        markets = requests.get(
-            "https://api.coingecko.com/api/v3/coins/markets",
-            params={"vs_currency": "usd", "ids": coin_id},
-            headers=HTTP_HEADERS,
-            timeout=8,
-        )
-        markets.raise_for_status()
-        data = markets.json()
-        if data:
-            return data[0].get("image")
-    except Exception:
-        logger.exception("get_coin_logo error")
-    return None
-
-
-async def _reply_with_logo(update: Update, symbol: str, caption: str):
-    logo_url = get_coin_logo(symbol)
-    if logo_url:
-        try:
-            await update.message.reply_photo(photo=logo_url, caption=caption)
-            return
-        except Exception:
-            logger.exception("send logo error")
-    await update.message.reply_text(caption)
-
-
-# ---------- /crypto ----------
-async def crypto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Cú pháp: /crypto <coin>\nVD: /crypto BTC")
-        return
-    raw_symbol = context.args[0].upper().lstrip("$")
-    alias_note = ""
-    if raw_symbol in CRYPTO_ALIASES:
-        alias_note = f" (Gram — dự án gốc của Telegram, nay là TON)"
-        symbol = CRYPTO_ALIASES[raw_symbol]
-    else:
-        symbol = raw_symbol
-
-    # 1) Ưu tiên Binance — ổn định, free, không bị chặn từ server
-    try:
-        pair = f"{symbol}USDT"
-        resp = requests.get(
-            "https://api.binance.com/api/v3/ticker/24hr",
-            params={"symbol": pair},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            price = float(data["lastPrice"])
-            change = float(data["priceChangePercent"])
-            arrow = "🟢" if change >= 0 else "🔴"
-            caption = (
-                f"💰 {symbol}/USDT{alias_note}: ${price:,.4f}\n"
-                f"{arrow} 24h: {change:.2f}% (nguồn: Binance)"
-            )
-            await _reply_with_logo(update, symbol, caption)
-            return
-        # symbol không tồn tại trên Binance -> rơi xuống fallback CoinGecko
-    except Exception:
-        logger.exception("crypto binance error")
-
-    # 2) Fallback: CoinGecko (cho coin nhỏ không có trên Binance)
-    try:
-        coin_id = COIN_MAP.get(symbol)
-        if not coin_id:
-            search = requests.get(
-                "https://api.coingecko.com/api/v3/search",
-                params={"query": symbol},
-                headers=HTTP_HEADERS,
-                timeout=10,
-            )
-            search.raise_for_status()
-            coins = search.json().get("coins", [])
-            if not coins:
-                await update.message.reply_text(f"Không tìm thấy coin '{symbol}' 😕")
-                return
-            coin_id = coins[0]["id"]
-
-        price_resp = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={
-                "ids": coin_id,
-                "vs_currencies": "usd",
-                "include_24hr_change": "true",
-            },
-            headers=HTTP_HEADERS,
-            timeout=10,
-        )
-        price_resp.raise_for_status()
-        data = price_resp.json().get(coin_id)
-        if not data:
-            await update.message.reply_text(
-                f"Không lấy được giá cho '{symbol}' — coin có thể không tồn tại hoặc API đang giới hạn 😕"
-            )
-            return
-        usd = data.get("usd")
-        change = data.get("usd_24h_change", 0)
-        arrow = "🟢" if change >= 0 else "🔴"
-        caption = (
-            f"💰 {symbol}{alias_note}: ${usd:,.4f}\n"
-            f"{arrow} 24h: {change:.2f}% (nguồn: CoinGecko)"
-        )
-        await _reply_with_logo(update, symbol, caption)
-    except Exception as e:
-        logger.exception("crypto coingecko error")
-        await update.message.reply_text(f"Lỗi lấy giá crypto: {e}")
-
-
-# ---------- /stocks — chứng khoán thế giới ----------
-STOCK_INDEXES = {
-    "S&P 500 (Mỹ)": "^GSPC",
-    "Dow Jones (Mỹ)": "^DJI",
-    "Nasdaq (Mỹ)": "^IXIC",
-    "Nikkei 225 (Nhật)": "^N225",
-    "Hang Seng (HK)": "^HSI",
-    "FTSE 100 (Anh)": "^FTSE",
-    "DAX (Đức)": "^GDAXI",
-}
-
-
-def get_stock_quote(symbol: str):
-    resp = requests.get(
-        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
-        headers=HTTP_HEADERS,
-        timeout=10,
-    )
-    resp.raise_for_status()
-    meta = resp.json()["chart"]["result"][0]["meta"]
-    price = meta["regularMarketPrice"]
-    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
-    change = ((price - prev) / prev * 100) if prev else 0
-    return price, change
-
-
-async def stocks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lines = ["🌍 Chứng khoán thế giới\n"]
-    for name, symbol in STOCK_INDEXES.items():
-        try:
-            price, change = get_stock_quote(symbol)
-            arrow = "🟢" if change >= 0 else "🔴"
-            lines.append(f"{name}: {price:,.2f} {arrow} {change:.2f}%")
-        except Exception:
-            logger.exception(f"stocks error {symbol}")
-            continue
-    if len(lines) == 1:
-        await update.message.reply_text("Không lấy được dữ liệu chứng khoán lúc này 😕")
-        return
-    await update.message.reply_text("\n".join(lines))
-
-
-# ---------- /translate ----------
-async def translate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text(
-            "Cú pháp: /translate <text> (auto detect, dịch sang Việt)\n"
-            "Hoặc: /translate <mã ngôn ngữ đích> <text>\nVD: /translate en xin chào"
-        )
-        return
-
-    target = "vi"
-    words = context.args
-    possible_lang = words[0].lower()
-    if len(possible_lang) == 2 and len(words) > 1:
-        target = possible_lang
-        text = " ".join(words[1:])
-    else:
-        text = " ".join(words)
-
-    try:
-        resp = requests.get(
-            "https://translate.googleapis.com/translate_a/single",
-            params={
-                "client": "gtx",
-                "sl": "auto",
-                "tl": target,
-                "dt": "t",
-                "q": text,
-            },
-            timeout=10,
-        ).json()
-        translated = "".join(chunk[0] for chunk in resp[0])
-        await update.message.reply_text(f"🌐 {translated}")
-    except Exception as e:
-        logger.exception("translate error")
-        await update.message.reply_text(f"Lỗi dịch: {e}")
-
-
-# ---------- /calc ----------
-SAFE_OPS = {
+OPS = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
     ast.Mult: operator.mul,
     ast.Div: operator.truediv,
-    ast.FloorDiv: operator.floordiv,
-    ast.Mod: operator.mod,
-    ast.Pow: operator.pow,
     ast.USub: operator.neg,
     ast.UAdd: operator.pos,
 }
 
 
-def safe_eval(node):
-    if isinstance(node, ast.Expression):
-        return safe_eval(node.body)
-    if isinstance(node, ast.Constant):
-        if isinstance(node.value, (int, float)):
-            return node.value
-        raise ValueError("Chỉ hỗ trợ số")
-    if isinstance(node, ast.BinOp) and type(node.op) in SAFE_OPS:
-        return SAFE_OPS[type(node.op)](safe_eval(node.left), safe_eval(node.right))
-    if isinstance(node, ast.UnaryOp) and type(node.op) in SAFE_OPS:
-        return SAFE_OPS[type(node.op)](safe_eval(node.operand))
-    raise ValueError("Biểu thức không hợp lệ")
+class Out:
+    def __init__(self, text: str, photo: bytes | None = None, poll: dict | None = None, anonymous: bool = False):
+        self.text = text
+        self.photo = photo
+        self.poll = poll
+        self.anonymous = anonymous
 
 
-async def calc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Cú pháp: /calc <biểu thức>\nVD: /calc (12+8)*3/2")
-        return
-    expr = " ".join(context.args)
-    try:
-        tree = ast.parse(expr, mode="eval")
-        result = safe_eval(tree)
-        await update.message.reply_text(f"🧮 {expr} = {result}")
-    except Exception:
-        await update.message.reply_text("Biểu thức không hợp lệ 😕 (chỉ hỗ trợ + - * / // % **)")
-
-
-# ---------- /short ----------
-async def short_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Cú pháp: /short <url>\nVD: /short https://example.com/long-link")
-        return
-    url = context.args[0]
-    try:
-        resp = requests.get(
-            "https://is.gd/create.php",
-            params={"format": "simple", "url": url},
-            timeout=10,
-        )
-        short_url = resp.text.strip()
-        if short_url.startswith("http"):
-            await update.message.reply_text(f"🔗 {short_url}")
-        else:
-            await update.message.reply_text(f"Lỗi rút gọn link: {short_url}")
-    except Exception as e:
-        logger.exception("short error")
-        await update.message.reply_text(f"Lỗi rút gọn link: {e}")
-
-
-# ---------- /fng — Fear & Greed Index ----------
-async def fng_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        resp = requests.get("https://api.alternative.me/fng/", timeout=10, headers=HTTP_HEADERS)
-        resp.raise_for_status()
-        entry = resp.json()["data"][0]
-        value = int(entry["value"])
-        label = entry["value_classification"]
-        vi_label = {
-            "Extreme Fear": "Cực kỳ sợ hãi 😱",
-            "Fear": "Sợ hãi 😨",
-            "Neutral": "Trung lập 😐",
-            "Greed": "Tham lam 🤑",
-            "Extreme Greed": "Cực kỳ tham lam 🚀",
-        }.get(label, label)
-        bar_filled = round(value / 10)
-        bar = "🟩" * bar_filled + "⬜" * (10 - bar_filled)
-        await update.message.reply_text(
-            f"📊 Chỉ số Sợ hãi & Tham lam (Crypto Fear & Greed)\n"
-            f"{bar}\n"
-            f"{value}/100 — {vi_label}"
-        )
-    except Exception as e:
-        logger.exception("fng error")
-        await update.message.reply_text(f"Lỗi lấy chỉ số F&G: {e}")
-
-
-# ---------- /top10 ----------
-async def top10_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        resp = requests.get(
-            "https://api.coingecko.com/api/v3/coins/markets",
-            params={
-                "vs_currency": "usd",
-                "order": "market_cap_desc",
-                "per_page": 10,
-                "page": 1,
-                "price_change_percentage": "24h",
-            },
-            headers=HTTP_HEADERS,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        coins = resp.json()
-        if not coins:
-            await update.message.reply_text("Không lấy được dữ liệu Top 10 lúc này 😕")
-            return
-        lines = ["🏆 Top 10 crypto theo vốn hóa\n"]
-        for i, c in enumerate(coins, start=1):
-            change = c.get("price_change_percentage_24h") or 0
-            arrow = "🟢" if change >= 0 else "🔴"
-            lines.append(
-                f"{i}. {c['symbol'].upper()} — ${c['current_price']:,.2f} {arrow} {change:.2f}%"
-            )
-        await update.message.reply_text("\n".join(lines))
-    except Exception as e:
-        logger.exception("top10 error")
-        await update.message.reply_text(f"Lỗi lấy Top 10: {e}")
-
-
-# ---------- /convert ----------
-async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 3:
-        await update.message.reply_text(
-            "Cú pháp: /convert <số lượng> <từ> <sang>\n"
-            "VD: /convert 100 USD VND\nVD: /convert 0.5 BTC USDT\nVD: /convert 2000000 VND USD"
-        )
-        return
-    try:
-        amount = float(context.args[0])
-    except ValueError:
-        await update.message.reply_text("Số lượng không hợp lệ 😕")
-        return
-    from_cur = context.args[1].upper()
-    to_cur = context.args[2].upper()
-
-    try:
-        usd_value = await _to_usd(amount, from_cur)
-        if usd_value is None:
-            await update.message.reply_text(f"Không nhận diện được đơn vị '{from_cur}' 😕")
-            return
-        result = await _from_usd(usd_value, to_cur)
-        if result is None:
-            await update.message.reply_text(f"Không nhận diện được đơn vị '{to_cur}' 😕")
-            return
-        await update.message.reply_text(
-            f"💱 {amount:g} {from_cur} ≈ {result:,.6g} {to_cur}"
-        )
-    except Exception as e:
-        logger.exception("convert error")
-        await update.message.reply_text(f"Lỗi quy đổi: {e}")
-
-
-async def _to_usd(amount: float, symbol: str):
-    if symbol == "USD":
-        return amount
-    rate = _get_fiat_rate(symbol)
-    if rate is not None:
-        return amount / rate
-    price = _get_binance_price(symbol)
-    if price is not None:
-        return amount * price
-    return None
-
-
-async def _from_usd(usd_value: float, symbol: str):
-    if symbol == "USD":
-        return usd_value
-    rate = _get_fiat_rate(symbol)
-    if rate is not None:
-        return usd_value * rate
-    price = _get_binance_price(symbol)
-    if price is not None:
-        return usd_value / price
-    return None
-
-
-def _get_fiat_rate(symbol: str):
-    try:
-        resp = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
-        resp.raise_for_status()
-        rates = resp.json().get("rates", {})
-        return rates.get(symbol)
-    except Exception:
+def extract_command(text: str, bot_username: str | None) -> tuple[str, str] | None:
+    if not text or not text.strip().startswith("/"):
         return None
+    head, _, rest = text.strip().partition(" ")
+    token = head[1:]
+    name, sep, target = token.partition("@")
+    name = name.lower()
+    if not name or not re.fullmatch(r"[a-z0-9_]+", name):
+        return None
+    if sep and bot_username and target.lower() != bot_username.lower():
+        return None
+    return ALIASES.get(name, name), rest.strip()
 
 
-def _get_binance_price(symbol: str):
-    try:
-        resp = requests.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            params={"symbol": f"{symbol}USDT"},
-            timeout=10,
-        )
-        if resp.status_code != 200:
+def http_json(url: str, timeout: int = 12) -> dict | list:
+    req = urllib.request.Request(url, headers={"User-Agent": "SugarBot/1.0", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def http_text(url: str, timeout: int = 12) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "SugarBot/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def money(value: float, digits: int = 2) -> str:
+    sign = "-" if value < 0 else ""
+    raw = f"{abs(value):,.{digits}f}"
+    return sign + raw.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def safe_calc(expr: str) -> float:
+    tree = ast.parse(expr, mode="eval")
+
+    def walk(node):
+        if isinstance(node, ast.Expression):
+            return walk(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        if isinstance(node, ast.BinOp) and type(node.op) in OPS:
+            return OPS[type(node.op)](walk(node.left), walk(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in OPS:
+            return OPS[type(node.op)](walk(node.operand))
+        raise ValueError("bad")
+
+    return walk(tree)
+
+
+def fng_label(score: int) -> str:
+    if score <= 24:
+        return "Sợ hãi cực độ"
+    if score <= 44:
+        return "Sợ hãi"
+    if score <= 55:
+        return "Trung lập"
+    if score <= 74:
+        return "Tham lam"
+    return "Tham lam cực độ"
+
+
+class CommandRouter:
+    def __init__(self, rng: random.Random | None = None, online: bool = True):
+        self.rng = rng or random.Random()
+        self.online = online
+        self.handlers = {
+            "batdau": self.cmd_start,
+            "trogiup": self.cmd_help,
+            "noiquy": self.cmd_rules,
+            "tocdo": self.cmd_ping,
+            "gia": self.cmd_price,
+            "xephang": self.cmd_rank,
+            "socamxuc": self.cmd_mood,
+            "chungkhoan": self.cmd_stocks,
+            "tintuc": self.cmd_news,
+            "thoittiet": self.cmd_weather,
+            "dich": self.cmd_translate,
+            "tinh": self.cmd_calc,
+            "rutgon": self.cmd_short,
+            "doitien": self.cmd_convert,
+            "anhche": self.cmd_meme,
+            "caucuo": self.cmd_joke,
+            "suthat": self.cmd_fact,
+            "boi": self.cmd_ball,
+            "xucxac": self.cmd_roll,
+            "tungxu": self.cmd_flip,
+            "sukien": self.cmd_truth,
+            "thuthach": self.cmd_dare,
+            "dovui": self.cmd_quiz,
+            "tamtinh": self.cmd_confess,
+            "thamthuy": self.cmd_quote,
+            "treu": self.cmd_roast,
+        }
+
+    def reply(self, text: str, ctx: dict | None = None) -> Out | None:
+        ctx = ctx or {}
+        stripped = (text or "").strip()
+        if stripped in GROUPS:
+            return Out(self.group_text(stripped))
+        if stripped == "Nội quy":
+            return self.cmd_rules("", ctx)
+        parsed = extract_command(stripped, ctx.get("bot_username"))
+        if not parsed:
             return None
-        return float(resp.json()["price"])
-    except Exception:
-        return None
+        name, args = parsed
+        handler = self.handlers.get(name)
+        if not handler:
+            return Out(COPY["unknown"])
+        return handler(args, ctx)
 
+    def group_text(self, name: str) -> str:
+        lines = [name] + GROUPS[name]
+        if name == "Thị trường":
+            lines.append(COPY["market_note"])
+        return "\n".join(lines)
 
-# ---------- /ping ----------
-async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    start = time.monotonic()
-    msg = await update.message.reply_text("🏓 Đang đo...")
-    elapsed_ms = (time.monotonic() - start) * 1000
-    await msg.edit_text(f"🏓 Pong! {elapsed_ms:.0f}ms")
+    def cmd_start(self, args: str, ctx: dict) -> Out:
+        return Out(COPY["ready"], photo=cards.welcome_card())
 
+    def cmd_help(self, args: str, ctx: dict) -> Out:
+        return Out(COPY["ready"])
 
-# ---------- /rules ----------
-async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(RULES)
+    def cmd_rules(self, args: str, ctx: dict) -> Out:
+        lines = [COPY["rules_title"]]
+        for i, rule in enumerate(COPY["rules"], 1):
+            lines.append(f"{i}. {rule}")
+        return Out("\n".join(lines))
 
+    def cmd_ping(self, args: str, ctx: dict) -> Out:
+        lag = ctx.get("lag_ms")
+        if lag is None:
+            return Out("Còn đây.")
+        return Out(f"Còn đây. Lệnh tới sau {lag} mili giây.")
 
-# ---------- Chào thành viên mới ----------
-async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for member in update.message.new_chat_members:
-        if member.is_bot:
-            continue
-        name = member.first_name or "bạn"
-        await update.message.reply_text(
-            f"🎉 Chào mừng {name} đã tham gia group!\n\n"
-            f"Gõ /help để xem bot làm được gì — thời tiết, giá crypto, meme, "
-            f"quiz, truth or dare... đủ cả 😄\n"
-            f"Gõ /rules để xem nội quy group nhé."
+    def cmd_meme(self, args: str, ctx: dict) -> Out:
+        line = self.rng.choice(FUN["meme_lines"])
+        return Out(line, photo=cards.meme_card(line))
+
+    def cmd_joke(self, args: str, ctx: dict) -> Out:
+        return Out(self.rng.choice(FUN["jokes"]))
+
+    def cmd_fact(self, args: str, ctx: dict) -> Out:
+        return Out(self.rng.choice(FUN["facts"]))
+
+    def cmd_quote(self, args: str, ctx: dict) -> Out:
+        return Out(self.rng.choice(FUN["quotes"]))
+
+    def cmd_ball(self, args: str, ctx: dict) -> Out:
+        if not args:
+            return Out("Đặt câu hỏi sau lệnh. Ví dụ: /boi tuần này nên đứng ngoài không?")
+        return Out(f"“{args}”\n{self.rng.choice(FUN['eightball'])}")
+
+    def cmd_roll(self, args: str, ctx: dict) -> Out:
+        spec = args or "1d6"
+        match = re.fullmatch(r"(\d{1,2})d(\d{1,3})", spec.lower())
+        if not match:
+            return Out(COPY["bad_dice"])
+        count, sides = int(match.group(1)), int(match.group(2))
+        if not 1 <= count <= 20 or not 2 <= sides <= 100:
+            return Out(COPY["bad_dice"])
+        rolls = [self.rng.randint(1, sides) for _ in range(count)]
+        return Out(f"Xúc xắc {count}d{sides}: {', '.join(map(str, rolls))}. Tổng {sum(rolls)}.")
+
+    def cmd_flip(self, args: str, ctx: dict) -> Out:
+        return Out("Ngửa — cửa tăng." if self.rng.random() < 0.5 else "Sấp — cửa giảm.")
+
+    def cmd_truth(self, args: str, ctx: dict) -> Out:
+        return Out("Sự thật: " + self.rng.choice(FUN["truths"]))
+
+    def cmd_dare(self, args: str, ctx: dict) -> Out:
+        return Out("Thử thách: " + self.rng.choice(FUN["dares"]))
+
+    def cmd_quiz(self, args: str, ctx: dict) -> Out:
+        item = self.rng.choice(FUN["quizzes"])
+        return Out(
+            item["q"],
+            poll={"question": item["q"], "options": item["options"], "correct": item["correct"], "open_period": 30},
         )
 
+    def cmd_confess(self, args: str, ctx: dict) -> Out:
+        if not args:
+            return Out(COPY["need_confess"])
+        return Out(f"Tâm sự ẩn danh:\n{args[:800]}", anonymous=True)
 
-# ---------- /meme ----------
-MEME_SUBREDDITS = ["cryptocurrencymemes", "CryptoCurrencyMemes", "memes"]
+    def cmd_roast(self, args: str, ctx: dict) -> Out:
+        return Out("Thị trường không cần bị trêu. Caption lãi lỗ mới cần bị cắt một nửa.")
+
+    def cmd_calc(self, args: str, ctx: dict) -> Out:
+        if not args:
+            return Out(COPY["need_expr"])
+        try:
+            value = safe_calc(args.replace(",", "."))
+        except Exception:
+            return Out(COPY["bad_expr"])
+        return Out(f"{args} = {money(value, 4).rstrip('0').rstrip(',')}")
+
+    def cmd_price(self, args: str, ctx: dict) -> Out:
+        if not args:
+            return Out(COPY["need_coin"])
+        if not self.online:
+            return Out("Đang tắt mạng trong bản thử.")
+        symbol = args.split()[0].lower()
+        try:
+            found = http_json(f"https://api.coingecko.com/api/v3/search?query={urllib.parse.quote(symbol)}")
+            coins = found.get("coins") or []
+            match = next((c for c in coins if c.get("symbol", "").lower() == symbol), coins[0] if coins else None)
+            if not match:
+                return Out(f"Không thấy mã {symbol}.")
+            data = http_json(
+                "https://api.coingecko.com/api/v3/simple/price"
+                f"?ids={match['id']}&vs_currencies=usd,vnd&include_24hr_change=true"
+            )[match["id"]]
+        except Exception:
+            return Out(COPY["source_fail"])
+        change = float(data.get("usd_24h_change") or 0)
+        usd = f"{money(float(data['usd']))} USD"
+        vnd = f"{money(float(data['vnd']), 0)} đ"
+        arrow = f"{'+' if change >= 0 else ''}{money(change)}% trong 24 giờ"
+        text = f"{match['name']} ({match['symbol'].upper()})\n{usd}\n{vnd}\n{arrow}\n{COPY['market_note']}"
+        photo = cards.price_card(match["name"], match["symbol"], usd, vnd, arrow, change >= 0)
+        return Out(text, photo=photo)
+
+    def cmd_rank(self, args: str, ctx: dict) -> Out:
+        if not self.online:
+            return Out("Đang tắt mạng trong bản thử.")
+        try:
+            rows = http_json(
+                "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1"
+            )
+        except Exception:
+            return Out(COPY["source_fail"])
+        lines = ["Mười mã vốn hóa lớn"]
+        card_rows = []
+        for i, coin in enumerate(rows, 1):
+            change = float(coin.get("price_change_percentage_24h") or 0)
+            line = f"{i}. {coin['symbol'].upper()}  {money(float(coin['current_price']))} USD  {money(change)}%"
+            lines.append(line)
+            card_rows.append(line)
+        lines.append(COPY["market_note"])
+        return Out("\n".join(lines), photo=cards.list_card("Vốn hóa", card_rows, "Nguồn công khai · không phải lời khuyên"))
+
+    def cmd_mood(self, args: str, ctx: dict) -> Out:
+        if not self.online:
+            return Out("Đang tắt mạng trong bản thử.")
+        try:
+            data = http_json("https://api.alternative.me/fng/?limit=1")["data"][0]
+            score = int(data["value"])
+        except Exception:
+            return Out(COPY["source_fail"])
+        label = fng_label(score)
+        return Out(
+            f"Sợ hãi và tham lam: {score}/100 — {label}.\n{COPY['market_note']}",
+            photo=cards.mood_card(score, label),
+        )
+
+    def cmd_stocks(self, args: str, ctx: dict) -> Out:
+        if not self.online:
+            return Out("Đang tắt mạng trong bản thử.")
+        symbols = [("^spx", "S&P 500"), ("^dji", "Dow Jones"), ("^ndq", "Nasdaq"), ("^vnindex", "VN-Index")]
+        lines = ["Chỉ số"]
+        card_rows = []
+        for symbol, label in symbols:
+            try:
+                raw = http_text(f"https://stooq.com/q/l/?s={urllib.parse.quote(symbol)}&f=sd2t2c&h&e=csv")
+                parts = raw.strip().splitlines()[-1].split(",")
+                price, change = parts[1], parts[2] if len(parts) > 2 else ""
+                line = f"{label}: {price} ({change})"
+            except Exception:
+                line = f"{label}: chưa lấy được"
+            lines.append(line)
+            card_rows.append(line)
+        lines.append(COPY["market_note"])
+        return Out("\n".join(lines), photo=cards.list_card("Chứng khoán", card_rows, "Nguồn công khai · có độ trễ"))
+
+    def cmd_news(self, args: str, ctx: dict) -> Out:
+        if not self.online:
+            return Out("Đang tắt mạng trong bản thử.")
+        key = (args or "viet").split()[0].lower()
+        feeds = {
+            "viet": "https://vnexpress.net/rss/tin-moi-nhat.rss",
+            "lam": "https://vnexpress.net/rss/kinh-doanh.rss",
+            "tien": "https://vnexpress.net/rss/kinh-doanh.rss",
+            "vn": "https://vnexpress.net/rss/tin-moi-nhat.rss",
+            "kinhdoanh": "https://vnexpress.net/rss/kinh-doanh.rss",
+            "crypto": "https://vnexpress.net/rss/so-hoa.rss",
+        }
+        url = feeds.get(key, feeds["viet"])
+        try:
+            root = ET.fromstring(http_text(url))
+            titles = [node.text.strip() for node in root.findall(".//item/title") if node.text][:5]
+        except Exception:
+            return Out(COPY["source_fail"])
+        if not titles:
+            return Out("Nguồn tin chưa có mục mới.")
+        return Out("Tin mới:\n" + "\n".join(f"• {title}" for title in titles))
+
+    def cmd_weather(self, args: str, ctx: dict) -> Out:
+        if not args:
+            return Out(COPY["need_city"])
+        if not self.online:
+            return Out("Đang tắt mạng trong bản thử.")
+        try:
+            geo = http_json(
+                "https://geocoding-api.open-meteo.com/v1/search?count=1&language=vi&name="
+                + urllib.parse.quote(args)
+            )
+            place = (geo.get("results") or [None])[0]
+            if not place:
+                return Out(f"Không thấy thành phố {args}.")
+            forecast = http_json(
+                "https://api.open-meteo.com/v1/forecast?current=temperature_2m,weather_code"
+                f"&timezone=auto&latitude={place['latitude']}&longitude={place['longitude']}"
+            )
+            temp = forecast["current"]["temperature_2m"]
+        except Exception:
+            return Out(COPY["source_fail"])
+        name = place.get("name") or args
+        return Out(f"{name}: {money(float(temp), 1)} °C hiện tại.")
+
+    def cmd_translate(self, args: str, ctx: dict) -> Out:
+        if not args:
+            return Out(COPY["need_text"])
+        if not self.online:
+            return Out("Đang tắt mạng trong bản thử.")
+        pair = "en|vi" if re.search(r"[A-Za-z]", args) and not re.search(r"[ăâêôơưáàảãạ]", args.lower()) else "vi|en"
+        try:
+            data = http_json(
+                "https://api.mymemory.translated.net/get?q="
+                + urllib.parse.quote(args[:400])
+                + "&langpair="
+                + pair
+            )
+            text = data["responseData"]["translatedText"]
+        except Exception:
+            return Out(COPY["source_fail"])
+        return Out(text)
+
+    def cmd_short(self, args: str, ctx: dict) -> Out:
+        if not args.startswith("http://") and not args.startswith("https://"):
+            return Out(COPY["need_url"])
+        if not self.online:
+            return Out("Đang tắt mạng trong bản thử.")
+        try:
+            short = http_text("https://is.gd/create.php?format=simple&url=" + urllib.parse.quote(args, safe="")).strip()
+        except Exception:
+            return Out(COPY["source_fail"])
+        if not short.startswith("http"):
+            return Out(COPY["source_fail"])
+        return Out(short)
+
+    def cmd_convert(self, args: str, ctx: dict) -> Out:
+        parts = args.split()
+        if len(parts) != 3:
+            return Out(COPY["need_convert"])
+        if not self.online:
+            return Out("Đang tắt mạng trong bản thử.")
+        amount, src, dst = parts
+        try:
+            number = float(amount.replace(".", "").replace(",", ".")) if "," in amount else float(amount)
+            data = http_json(
+                f"https://api.frankfurter.app/latest?amount={number}&from={src.upper()}&to={dst.upper()}"
+            )
+            value = data["rates"][dst.upper()]
+        except Exception:
+            return Out("Chưa đổi được cặp này. Dùng mã tiền tệ, ví dụ usd vnd.")
+        return Out(f"{money(number)} {src.upper()} = {money(float(value))} {dst.upper()}")
 
 
-async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sub = random.choice(MEME_SUBREDDITS)
-    try:
-        resp = requests.get(f"https://meme-api.com/gimme/{sub}", timeout=10).json()
-        url = resp.get("url")
-        title = resp.get("title", "Meme")
-        if url:
-            await update.message.reply_photo(photo=url, caption=f"😂 {title}")
-        else:
-            await update.message.reply_text("Không lấy được meme lúc này, thử lại sau 😅")
-    except Exception as e:
-        logger.exception("meme error")
-        await update.message.reply_text(f"Lỗi lấy meme: {e}")
+def reply_markup() -> dict:
+    return {
+        "keyboard": [[{"text": item} for item in row] for row in KEYBOARD],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
 
 
-# ---------- /joke ----------
-async def joke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🤣 {random.choice(JOKES)}")
+class TelegramPoller:
+    def __init__(self, token: str, router: CommandRouter):
+        self.token = token
+        self.router = router
+        self.offset = 0
+        self.username = ""
 
+    def api(self, method: str, payload: dict | None = None, timeout: int = 40) -> dict:
+        url = f"https://api.telegram.org/bot{self.token}/{method}"
+        data = json.dumps(payload or {}).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"{method} HTTP {exc.code}: {detail}") from exc
+        if not body.get("ok"):
+            raise RuntimeError(f"{method} failed: {body}")
+        return body
 
-# ---------- /fact ----------
-async def fact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"💡 {random.choice(FACTS)}")
+    def send_photo(self, chat_id: int, photo: bytes, caption: str) -> None:
+        boundary = "----SugarBoundary"
+        markup = json.dumps(reply_markup())
+        chunks = [
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat_id}\r\n".encode(),
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n{caption[:1000]}\r\n".encode(),
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"reply_markup\"\r\n\r\n{markup}\r\n".encode(),
+            (
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"the.png\"\r\n"
+                "Content-Type: image/png\r\n\r\n"
+            ).encode()
+            + photo
+            + f"\r\n--{boundary}--\r\n".encode(),
+        ]
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{self.token}/sendPhoto",
+            data=b"".join(chunks),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        if not body.get("ok"):
+            raise RuntimeError(body)
 
+    def set_menu(self) -> None:
+        me = self.api("getMe")["result"]
+        self.username = me.get("username") or ""
+        self.api("setMyCommands", {"commands": [{"command": name, "description": desc} for name, desc in MENU]})
+        print(f"Sugar online as @{self.username}. Im nếu không có lệnh / hoặc nút.")
 
-# ---------- /8ball ----------
-async def eightball_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Cú pháp: /8ball <câu hỏi>\nVD: /8ball Có nên mua BTC hôm nay?")
-        return
-    question = " ".join(context.args)
-    await update.message.reply_text(f"🎱 {question}\n→ {random.choice(EIGHTBALL)}")
-
-
-# ---------- /roll ----------
-async def roll_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    spec = context.args[0] if context.args else "1d6"
-    try:
-        n, sides = spec.lower().split("d")
-        n = int(n) if n else 1
-        sides = int(sides)
-        if not (1 <= n <= 20 and 2 <= sides <= 1000):
-            raise ValueError
-        rolls = [random.randint(1, sides) for _ in range(n)]
-        total = sum(rolls)
-        detail = ", ".join(str(r) for r in rolls)
-        await update.message.reply_text(f"🎲 Kết quả: {detail} (tổng: {total})")
-    except Exception:
-        await update.message.reply_text("Cú pháp: /roll <NdM>\nVD: /roll 2d6 (tung 2 xúc xắc 6 mặt)")
-
-
-# ---------- /flip ----------
-async def flip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    result = random.choice(["🚀 PUMP", "📉 DUMP"])
-    await update.message.reply_text(f"🪙 Tung đồng xu crypto: {result}")
-
-
-# ---------- /truth & /dare ----------
-async def truth_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🧠 Truth: {random.choice(TRUTHS)}")
-
-
-async def dare_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🔥 Dare: {random.choice(DARES)}")
-
-
-# ---------- /thamthuy ----------
-async def thamthuy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🌚 {random.choice(THAMTHUY)}")
-
-
-# ---------- /roast ----------
-async def roast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🔥 {random.choice(ROASTS)}")
-
-
-# ---------- /quiz ----------
-async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    question, options, correct_idx = random.choice(QUIZZES)
-    await context.bot.send_poll(
-        chat_id=update.effective_chat.id,
-        question=f"🧩 {question}",
-        options=options,
-        type="quiz",
-        correct_option_id=correct_idx,
-        is_anonymous=True,
-        open_period=30,
-    )
-
-
-# ---------- /confess ----------
-async def confess_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Cú pháp: /confess <nội dung> — gửi ẩn danh vào group cấu hình sẵn.")
-        return
-    if not GROUP_CHAT_ID:
-        await update.message.reply_text("Chưa cấu hình GROUP_CHAT_ID trên Railway nên chưa dùng được /confess.")
-        return
-    text = " ".join(context.args)
-    try:
-        await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=f"🙊 Confession ẩn danh:\n{text}")
-        if update.effective_chat.id != int(GROUP_CHAT_ID):
-            await update.message.reply_text("Đã gửi ẩn danh vào group ✅")
-    except Exception as e:
-        logger.exception("confess error")
-        await update.message.reply_text(f"Lỗi gửi confession: {e}")
-
-
-# ---------- Auto-reply theo keyword + phản ứng ngẫu nhiên cho sống động ----------
-async def auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-    text = update.message.text.lower()
-    triggers = load_triggers()
-    for keyword, reply in triggers.items():
-        if keyword.lower() in text:
-            await update.message.reply_text(reply)
+    def deliver(self, chat_id: int, out: Out) -> None:
+        self.api("sendChatAction", {"chat_id": chat_id, "action": "upload_photo" if out.photo else "typing"}, timeout=15)
+        if out.poll:
+            self.api(
+                "sendPoll",
+                {
+                    "chat_id": chat_id,
+                    "question": out.poll["question"],
+                    "options": [{"text": item} for item in out.poll["options"]],
+                    "type": "quiz",
+                    "correct_option_id": out.poll["correct"],
+                    "open_period": 30,
+                    "is_anonymous": True,
+                    "reply_markup": reply_markup(),
+                },
+                timeout=20,
+            )
             return
-
-    # Không trúng từ khóa nào -> có thể random react/chatter cho group đỡ im ắng
-    chat_id = update.effective_chat.id
-    _idle_counters[chat_id] = _idle_counters.get(chat_id, 0) + 1
-    threshold = _idle_thresholds.setdefault(chat_id, random.randint(15, 30))
-
-    # Thỉnh thoảng (khoảng 10%) thả reaction emoji vào tin nhắn cho vui, không spam text
-    if random.random() < 0.1:
-        try:
-            await context.bot.set_message_reaction(
-                chat_id=chat_id,
-                message_id=update.message.message_id,
-                reaction=[ReactionTypeEmoji(random.choice(REACTION_EMOJIS))],
-            )
-        except Exception:
-            pass  # bot có thể chưa có quyền react, bỏ qua êm
-
-    if _idle_counters[chat_id] >= threshold:
-        _idle_counters[chat_id] = 0
-        _idle_thresholds[chat_id] = random.randint(15, 30)
-        await update.message.reply_text(random.choice(IDLE_CHATTER))
-
-
-# ---------- /start & /help — menu nút bấm ----------
-MAIN_MENU = InlineKeyboardMarkup(
-    [
-        [InlineKeyboardButton("🔧 Công cụ", callback_data="menu_tools")],
-        [InlineKeyboardButton("📈 Thị trường", callback_data="menu_market")],
-        [InlineKeyboardButton("🎉 Vui / Giao lưu", callback_data="menu_fun")],
-        [InlineKeyboardButton("📜 Nội quy", callback_data="menu_rules")],
-    ]
-)
-
-MENU_TEXT = {
-    "menu_tools": (
-        "🔧 Công cụ\n\n"
-        "/weather <city> — thời tiết\n"
-        "/translate <text> — dịch nhanh\n"
-        "/calc <expression> — máy tính\n"
-        "/short <url> — rút gọn link\n"
-        "/convert <số> <từ> <sang> — quy đổi tiền tệ/crypto\n"
-        "/ping — đo tốc độ phản hồi bot"
-    ),
-    "menu_market": (
-        "📈 Thị trường\n\n"
-        "/crypto <coin> — giá crypto real-time + logo (thử /crypto GRAM 😉)\n"
-        "/top10 — Top 10 coin theo vốn hóa\n"
-        "/fng — Chỉ số Sợ hãi & Tham lam\n"
-        "/stocks — Chứng khoán thế giới (S&P500, Dow, Nasdaq...)\n"
-        "/news [vn|kinhdoanh|crypto] — tin tức Việt Nam"
-    ),
-    "menu_fun": (
-        "🎉 Vui / Giao lưu\n\n"
-        "/meme — meme crypto ngẫu nhiên\n"
-        "/joke — joke crypto/kinh doanh\n"
-        "/fact — fact thú vị\n"
-        "/8ball <câu hỏi> — quả cầu tiên tri\n"
-        "/roll <NdM> — tung xúc xắc\n"
-        "/flip — tung xu pump/dump\n"
-        "/truth, /dare — truth or dare\n"
-        "/thamthuy — câu nói thâm thúy\n"
-        "/roast — troll nhẹ thị trường\n"
-        "/quiz — trivia crypto (poll 30s)\n"
-        "/confess <nội dung> — confession ẩn danh"
-    ),
-    "menu_rules": RULES,
-}
-
-
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 Sugar bot đã sẵn sàng!\n\nBấm 1 mục bên dưới để xem lệnh, hoặc gõ /help bất cứ lúc nào.",
-        reply_markup=MAIN_MENU,
-    )
-
-
-async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    text = MENU_TEXT.get(query.data)
-    if text:
-        await query.edit_message_text(text, reply_markup=MAIN_MENU)
-
-
-# ---------- Bản tin tự động (job hằng ngày — sáng/trưa/tối) ----------
-async def daily_briefing(context: ContextTypes.DEFAULT_TYPE):
-    if not GROUP_CHAT_ID:
-        return
-    period = context.job.data if context.job else "morning"
-
-    def get_btc():
-        try:
-            resp = requests.get(
-                "https://api.binance.com/api/v3/ticker/24hr",
-                params={"symbol": "BTCUSDT"},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                d = resp.json()
-                price = float(d["lastPrice"])
-                change = float(d["priceChangePercent"])
-                arrow = "🟢" if change >= 0 else "🔴"
-                return f"💰 BTC: ${price:,.0f} {arrow} {change:.2f}% (24h)"
-        except Exception:
-            logger.exception("daily_briefing btc error")
-        return None
-
-    def get_fng():
-        try:
-            resp = requests.get("https://api.alternative.me/fng/", timeout=10, headers=HTTP_HEADERS)
-            if resp.status_code == 200:
-                entry = resp.json()["data"][0]
-                return f"📊 Fear & Greed: {entry['value']}/100"
-        except Exception:
-            logger.exception("daily_briefing fng error")
-        return None
-
-    def get_news_line(topic="vn"):
-        try:
-            items = parse_rss(NEWS_FEEDS[topic], limit=1)
-            if items:
-                title, link = items[0]
-                return f"📰 {title}\n{link}"
-        except Exception:
-            logger.exception("daily_briefing news error")
-        return None
-
-    lines = []
-    if period == "morning":
-        lines.append("☀️ Bản tin sáng Sugar Bot\n")
-        lines += [x for x in [get_btc(), get_fng(), get_news_line("kinhdoanh")] if x]
-        lines.append(f"\n💡 {random.choice(FACTS)}")
-        lines.append(f"🤣 {random.choice(JOKES)}")
-        lines.append("\nChúc cả nhà một ngày múc coin thuận lợi 🚀")
-    elif period == "noon":
-        lines.append("🌤 Điểm tin trưa\n")
-        lines += [x for x in [get_btc(), get_news_line("crypto")] if x]
-        lines.append(f"\n🎱 {random.choice(EIGHTBALL)}")
-    else:  # evening
-        lines.append("🌙 Tổng kết tối\n")
-        lines += [x for x in [get_btc(), get_fng(), get_news_line("vn")] if x]
-        lines.append(f"\n🌚 {random.choice(THAMTHUY)}")
-        lines.append("\nNgủ ngon, mai lại múc tiếp 😴")
-
-    try:
-        await context.bot.send_message(
-            chat_id=GROUP_CHAT_ID, text="\n".join(lines), disable_web_page_preview=True
-        )
-    except Exception:
-        logger.exception("daily_briefing send error")
-
-
-def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("Thiếu biến môi trường BOT_TOKEN")
-
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    if GROUP_CHAT_ID and app.job_queue:
-        tz = ZoneInfo("Asia/Ho_Chi_Minh")
-        app.job_queue.run_daily(
-            daily_briefing, time=datetime.time(hour=8, minute=0, tzinfo=tz), data="morning"
-        )
-        app.job_queue.run_daily(
-            daily_briefing, time=datetime.time(hour=12, minute=30, tzinfo=tz), data="noon"
-        )
-        app.job_queue.run_daily(
-            daily_briefing, time=datetime.time(hour=20, minute=0, tzinfo=tz), data="evening"
+        if out.photo:
+            self.send_photo(chat_id, out.photo, out.text)
+            return
+        self.api(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": out.text[:4000],
+                "disable_web_page_preview": True,
+                "reply_markup": reply_markup(),
+            },
+            timeout=20,
         )
 
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("help", start_cmd))
-    app.add_handler(CommandHandler("weather", weather_cmd))
-    app.add_handler(CommandHandler("crypto", crypto_cmd))
-    app.add_handler(CommandHandler("translate", translate_cmd))
-    app.add_handler(CommandHandler("calc", calc_cmd))
-    app.add_handler(CommandHandler("short", short_cmd))
-    app.add_handler(CommandHandler("convert", convert_cmd))
-    app.add_handler(CommandHandler("ping", ping_cmd))
-    app.add_handler(CommandHandler("top10", top10_cmd))
-    app.add_handler(CommandHandler("fng", fng_cmd))
-    app.add_handler(CommandHandler("news", news_cmd))
-    app.add_handler(CommandHandler("stocks", stocks_cmd))
-    app.add_handler(CommandHandler("rules", rules_cmd))
-    app.add_handler(CommandHandler("meme", meme_cmd))
-    app.add_handler(CommandHandler("joke", joke_cmd))
-    app.add_handler(CommandHandler("fact", fact_cmd))
-    app.add_handler(CommandHandler("8ball", eightball_cmd))
-    app.add_handler(CommandHandler("roll", roll_cmd))
-    app.add_handler(CommandHandler("flip", flip_cmd))
-    app.add_handler(CommandHandler("truth", truth_cmd))
-    app.add_handler(CommandHandler("dare", dare_cmd))
-    app.add_handler(CommandHandler("thamthuy", thamthuy_cmd))
-    app.add_handler(CommandHandler("roast", roast_cmd))
-    app.add_handler(CommandHandler("quiz", quiz_cmd))
-    app.add_handler(CommandHandler("confess", confess_cmd))
-    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_reply))
+    def handle(self, update: dict) -> None:
+        message = update.get("message")
+        if not message:
+            return
+        text = message.get("text") or ""
+        chat_id = (message.get("chat") or {}).get("id")
+        if chat_id is None:
+            return
+        sent = message.get("date")
+        lag = max(0, int(time.time()) - sent) * 1000 if isinstance(sent, int) else None
+        out = self.router.reply(text, {"bot_username": self.username, "lag_ms": lag})
+        if out:
+            self.deliver(chat_id, out)
 
-    logger.info("Bot đang chạy...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    def run(self) -> None:
+        self.set_menu()
+        while True:
+            try:
+                body = self.api(
+                    "getUpdates",
+                    {"offset": self.offset, "timeout": 30, "allowed_updates": ["message"]},
+                    timeout=40,
+                )
+            except RuntimeError as exc:
+                text = str(exc)
+                if "HTTP 401" in text:
+                    print("Token sai. Lấy lại ở @BotFather.", file=sys.stderr)
+                    raise SystemExit(1)
+                if "HTTP 409" in text:
+                    print("Một tiến trình khác đang giữ getUpdates. Tắt nó rồi chạy lại.", file=sys.stderr)
+                    raise SystemExit(1)
+                print(f"lỗi poll: {exc}", file=sys.stderr)
+                time.sleep(2)
+                continue
+            for update in body.get("result", []):
+                self.offset = update["update_id"] + 1
+                try:
+                    self.handle(update)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"update lỗi: {exc}", file=sys.stderr)
+
+
+def main() -> None:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        print("Thiếu TELEGRAM_BOT_TOKEN.", file=sys.stderr)
+        raise SystemExit(1)
+    TelegramPoller(token, CommandRouter()).run()
 
 
 if __name__ == "__main__":
