@@ -8,8 +8,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-FONT = "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"
-FONT_BOLD = "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"
+FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+FONT = str(FONT_DIR / "NotoSans-Regular.ttf")
+FONT_BOLD = str(FONT_DIR / "NotoSans-Bold.ttf")
 
 INK = (42, 24, 32)
 MUTED = (120, 78, 90)
@@ -65,7 +66,7 @@ def welcome_card() -> bytes:
     draw.text((80, 130), "Sugar đã sẵn sàng", font=font(64, True), fill=INK)
     body = wrap(
         draw,
-        "Bot nhóm. Chỉ lên tiếng khi có lệnh hoặc khi bạn bấm mục bên dưới.\nGiá, xếp hạng và ảnh chế đi kèm thẻ ảnh.",
+        "Bot nhóm. Chỉ lên tiếng khi có lệnh hoặc khi bạn bấm mục bên dưới.\nGọi /bong nếu muốn một câu trên nền tối, rồi mình biến.",
         font(32),
         980,
     )
@@ -119,6 +120,21 @@ def list_card(title: str, rows: list[str], footer: str) -> bytes:
     return finish(image, draw, footer)
 
 
+def ghost_card(line: str) -> bytes:
+    image = Image.new("RGB", (1200, 675), (18, 16, 20))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 10, 675), fill=(214, 196, 188))
+    draw.text((72, 64), "BÓNG", font=font(22, True), fill=(214, 196, 188))
+    y = 200
+    for row in wrap(draw, line, font(52, True), 1000):
+        draw.text((72, y), row, font=font(52, True), fill=(245, 240, 236))
+        y += 74
+    draw.text((72, 590), "Hiện một lần  ·  không ngồi lại", font=font(20), fill=(150, 138, 132))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
 def save_samples(folder: Path) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "chao.png").write_bytes(welcome_card())
@@ -126,7 +142,7 @@ def save_samples(folder: Path) -> None:
         price_card("Bitcoin", "BTC", "63.420 USD", "1.612.450.000 đ", "+2,4% trong 24 giờ", True)
     )
     (folder / "camxuc.png").write_bytes(mood_card(28, "Sợ hãi"))
-    (folder / "anhche.png").write_bytes(meme_card("Vừa bảo dài hạn, vừa mở sổ lệnh mỗi bốn phút."))
+    (folder / "bong.png").write_bytes(ghost_card("Có người vừa gọi. Mình ở tới hết câu này."))
 
 
 if __name__ == "__main__":

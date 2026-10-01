@@ -19,7 +19,7 @@ def main() -> None:
 
     check("im tin thuong", router.reply("hi bro") is None)
     start = router.reply("/batdau")
-    check("chao co anh", start is not None and start.photo is not None and "sẵn sàng" in start.text)
+    check("chao co anh", start is not None and start.photo is not None and "/bong" in start.text)
     help_text = router.reply("Công cụ").text
     check("cong cu thuan viet", "/thoittiet" in help_text and "weather" not in help_text.lower())
     market = router.reply("Thị trường").text
@@ -38,6 +38,10 @@ def main() -> None:
     confess = router.reply("/tamtinh hôm nay chốt non")
     check("tam tinh an", confess.anonymous and "chốt non" in confess.text)
     check("lenh la", extract_command("/Gia@Sugar_Bot btc", "sugar_bot") == ("gia", "btc"))
+    ghost = router.reply("/bong")
+    check("bong co the toi", ghost.photo is not None and ghost.anonymous and "AI" not in ghost.text)
+    check("ghost alias", router.reply("/ghost").photo is not None)
+    check("bong loi rieng", "đừng tag" in (router.reply("/bong đừng tag tên").text))
     menu = router.reply("/trogiup").text
     check("help khong tieng anh lenh", "ping" not in menu and "meme" not in menu)
 

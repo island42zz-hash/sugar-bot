@@ -58,6 +58,7 @@ MENU = [
     ("tamtinh", "Tâm sự ẩn với nhóm"),
     ("thamthuy", "Câu nói thâm"),
     ("treu", "Trêu nhẹ thị trường"),
+    ("bong", "Hiện một câu rồi biến"),
     ("noiquy", "Nội quy nhóm"),
 ]
 
@@ -88,6 +89,7 @@ ALIASES = {
     "confess": "tamtinh",
     "roast": "treu",
     "rules": "noiquy",
+    "ghost": "bong",
 }
 
 GROUPS = {
@@ -119,6 +121,7 @@ GROUPS = {
         "/tamtinh <nội dung> — tâm sự ẩn danh",
         "/thamthuy — câu nói thâm",
         "/treu — trêu nhẹ thị trường",
+        "/bong — hiện một câu rồi biến",
     ],
 }
 
@@ -232,6 +235,7 @@ class CommandRouter:
             "tamtinh": self.cmd_confess,
             "thamthuy": self.cmd_quote,
             "treu": self.cmd_roast,
+            "bong": self.cmd_ghost,
         }
 
     def reply(self, text: str, ctx: dict | None = None) -> Out | None:
@@ -275,8 +279,35 @@ class CommandRouter:
         return Out(f"Còn đây. Lệnh tới sau {lag} mili giây.")
 
     def cmd_meme(self, args: str, ctx: dict) -> Out:
+        if self.online:
+            fetched = self.fetch_meme()
+            if fetched:
+                return fetched
         line = self.rng.choice(FUN["meme_lines"])
         return Out(line, photo=cards.meme_card(line))
+
+    def fetch_meme(self) -> Out | None:
+        subs = ("cryptocurrencymemes", "CryptoMemes", "memes")
+        for _ in range(3):
+            sub = self.rng.choice(subs)
+            try:
+                data = http_json(f"https://meme-api.com/gimme/{sub}")
+                if data.get("nsfw") or data.get("spoiler"):
+                    continue
+                url = data.get("url") or ""
+                if not url.lower().split("?")[0].endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    continue
+                req = urllib.request.Request(url, headers={"User-Agent": "SugarBot/1.0"})
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    blob = resp.read()
+                if not 1000 <= len(blob) <= 8_000_000:
+                    continue
+            except Exception:
+                continue
+            title = (data.get("title") or "Ảnh chế").strip()
+            source = data.get("subreddit") or sub
+            return Out(f"{title}\nNguồn: {source}", photo=blob)
+        return None
 
     def cmd_joke(self, args: str, ctx: dict) -> Out:
         return Out(self.rng.choice(FUN["jokes"]))
@@ -326,6 +357,10 @@ class CommandRouter:
 
     def cmd_roast(self, args: str, ctx: dict) -> Out:
         return Out("Thị trường không cần bị trêu. Caption lãi lỗ mới cần bị cắt một nửa.")
+
+    def cmd_ghost(self, args: str, ctx: dict) -> Out:
+        line = args[:180] if args else self.rng.choice(FUN["ghost"])
+        return Out(line, photo=cards.ghost_card(line), anonymous=True)
 
     def cmd_calc(self, args: str, ctx: dict) -> Out:
         if not args:
